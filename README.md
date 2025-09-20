@@ -17,6 +17,7 @@ bun dev <command> [options]
 ## Available Commands
 
 ### `hello`
+
 Say hello with an optional name.
 
 ```bash
@@ -24,6 +25,7 @@ bun dev hello --name "Your Name"
 ```
 
 ### `info`
+
 Display system information.
 
 ```bash
@@ -65,3 +67,4 @@ src/
 - **Commander.js** - CLI framework
 - **Chalk** - Terminal string styling
 - **TypeScript** - Type safety
+
