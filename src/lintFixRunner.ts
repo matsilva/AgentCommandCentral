@@ -1,4 +1,24 @@
+import chalk from "chalk";
 import { z } from "zod";
+
+const LOG_PREFIX = chalk.gray("[lint-fix]");
+const log = {
+	info(message: string) {
+		console.log(`${LOG_PREFIX} ${chalk.cyan(message)}`);
+	},
+	detail(message: string) {
+		console.log(`${LOG_PREFIX} ${chalk.dim(message)}`);
+	},
+	success(message: string) {
+		console.log(`${LOG_PREFIX} ${chalk.green(message)}`);
+	},
+	warn(message: string) {
+		console.warn(`${LOG_PREFIX} ${chalk.yellow(message)}`);
+	},
+	error(message: string) {
+		console.error(`${LOG_PREFIX} ${chalk.red(message)}`);
+	},
+};
 
 const models = [
 	"opencode/claude-sonnet-4",
@@ -29,6 +49,14 @@ const DEFAULT_ARGS = ["run"];
 const DEFAULT_LINT_COMMAND = process.env.ACC_LINT_COMMAND;
 
 export type CommandSpec = string | string[];
+
+function describeCommandSpec(command: CommandSpec): string {
+	return Array.isArray(command) ? command.join(" ") : command;
+}
+
+function truncate(value: string, maxLength = 80): string {
+	return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
+}
 
 const lintTaskArraySchema = z.array(
 	z.object({
@@ -181,6 +209,14 @@ async function invokeOpencode(
 	const bin = options.bin ?? DEFAULT_BIN;
 	const baseArgs = [...(options.args ?? DEFAULT_ARGS)];
 	const extraArgs = [...(options.extraArgs ?? [])];
+	const displayArgs = [bin, ...baseArgs];
+	if (options.model) {
+		displayArgs.push("--model", options.model);
+	}
+	if (extraArgs.length > 0) {
+		displayArgs.push(...extraArgs);
+	}
+	log.detail(`Invoking ${displayArgs.join(" ")}`);
 
 	const args = [bin, ...baseArgs, ...extraArgs, prompt].filter(
 		(value): value is string => typeof value === "string",
@@ -194,10 +230,14 @@ async function invokeOpencode(
 		pickBaseOptions(options),
 	);
 	if (exitCode !== 0) {
+		log.error(
+			`Model invocation failed with code ${exitCode} (${stderr || stdout || "unknown error"}).`,
+		);
 		throw new Error(
 			`Model invocation failed with code ${exitCode}: ${stderr || stdout || "unknown error"}`,
 		);
 	}
+	log.detail("Model invocation completed successfully.");
 
 	return stdout;
 }
@@ -212,25 +252,35 @@ export async function generateLintTaskItems(
 	options: GenerateLintTaskItemsOptions,
 ): Promise<LintTaskItem[]> {
 	const resolvedLintCommand = resolveLintCommand(options.lintCommand);
+	log.info(`Running lint command: ${describeCommandSpec(resolvedLintCommand)}`);
 	const lintCommandArgs = toCommandArgs(resolvedLintCommand);
 	const { stdout, stderr, exitCode } = await runProcess(
 		lintCommandArgs,
 		pickBaseOptions(options),
 	);
 	if (exitCode !== 0) {
+		log.warn(
+			`Lint command exited with code ${exitCode} (${stderr || stdout || "no output"}).`,
+		);
 		throw new Error(
 			`Lint command failed with code ${exitCode}: ${stderr || stdout}`,
 		);
 	}
+	log.detail("Lint command completed successfully.");
 
 	const lintOutput = [stdout, stderr]
 		.filter((part) => part.length > 0)
 		.join("\n");
 	if (!lintOutput) {
+		log.info("No lint output produced; skipping lint fix parsing.");
 		return [];
 	}
+	log.detail(`Collected lint output (${lintOutput.length} chars).`);
 
 	const prompt = await generateLintTaskPrompt(lintOutput);
+	log.info(
+		`Invoking parser model ${options.opencode?.model ?? "default"} for lint issue extraction.`,
+	);
 	const normalizedOutput = await invokeOpencode(prompt, options.opencode);
 
 	const jsonCandidate = extractJsonCandidate(normalizedOutput);
@@ -238,6 +288,7 @@ export async function generateLintTaskItems(
 	if (!parsed.success) {
 		throw new Error(`Failed to parse lint task items: ${parsed.error.message}`);
 	}
+	log.success(`Identified ${parsed.data.length} lint issue(s) to fix.`);
 
 	return parsed.data;
 }
@@ -269,14 +320,22 @@ async function runFixForIssue(
 	issue: LintTaskItem,
 	options: OpencodeCommandOptions = {},
 ): Promise<LintTaskResult> {
+	log.info(
+		`Applying fix for ${issue.filePath}:${issue.loc} — ${truncate(issue.lintMessage)}`,
+	);
 	const prompt = buildFixPrompt(issue);
 	const output = await invokeOpencode(prompt, options);
 
 	const jsonCandidate = extractJsonCandidate(output);
 	const parsed = lintTaskResultSchema.safeParse(JSON.parse(jsonCandidate));
 	if (!parsed.success) {
+		log.error(`Failed to parse lint fix result: ${parsed.error.message}`);
 		throw new Error(`Failed to parse lint fix result: ${parsed.error.message}`);
 	}
+	const summaryPreview = truncate(parsed.data.summary, 120);
+	log.success(
+		`Fix result for ${issue.filePath}:${issue.loc}: ${parsed.data.status} (${summaryPreview})`,
+	);
 
 	return parsed.data;
 }
@@ -319,6 +378,8 @@ export async function runLintFixes(
 	options: RunLintFixesOptions,
 ): Promise<RunLintFixesResult> {
 	const lintCommand = resolveLintCommand(options.lintCommand);
+	log.info("Starting lint fix run.");
+	log.detail(`Using lint command: ${describeCommandSpec(lintCommand)}`);
 	const issues = await generateLintTaskItems({
 		lintCommand,
 		cwd: options.cwd,
@@ -327,15 +388,27 @@ export async function runLintFixes(
 	});
 
 	if (issues.length === 0) {
+		log.success("No lint issues detected. Nothing to fix.");
 		return { issues, results: [] as LintTaskResult[] };
 	}
+	log.success(`Identified ${issues.length} lint issue(s) to address.`);
 
 	const concurrency = options.fixer?.concurrency ?? 1;
+	log.detail(`Applying fixes with concurrency ${concurrency}.`);
 	const results = await runWithConcurrency(
 		issues,
 		(issue) => runFixForIssue(issue, options.fixer),
 		concurrency,
 	);
+	const statusCounts = results.reduce<Record<string, number>>((acc, result) => {
+		acc[result.status] = (acc[result.status] ?? 0) + 1;
+		return acc;
+	}, {});
+	const statusSummary =
+		Object.entries(statusCounts)
+			.map(([status, count]) => `${status}: ${count}`)
+			.join(", ") || "no results";
+	log.success(`Completed lint fixes. Status breakdown — ${statusSummary}.`);
 
 	return { issues, results };
 }
