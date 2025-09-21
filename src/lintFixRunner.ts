@@ -258,19 +258,26 @@ export async function generateLintTaskItems(
 		lintCommandArgs,
 		pickBaseOptions(options),
 	);
-	if (exitCode !== 0) {
-		log.warn(
-			`Lint command exited with code ${exitCode} (${stderr || stdout || "no output"}).`,
-		);
-		throw new Error(
-			`Lint command failed with code ${exitCode}: ${stderr || stdout}`,
-		);
-	}
-	log.detail("Lint command completed successfully.");
 
 	const lintOutput = [stdout, stderr]
 		.filter((part) => part.length > 0)
 		.join("\n");
+
+	if (exitCode !== 0) {
+		if (!lintOutput) {
+			log.error(
+				`Lint command exited with code ${exitCode} without usable output.`,
+			);
+			throw new Error(
+				`Lint command failed with code ${exitCode}: ${stderr || stdout}`,
+			);
+		}
+		log.warn(
+			`Lint command exited with code ${exitCode}; continuing with reported issues.`,
+		);
+	} else {
+		log.detail("Lint command completed successfully.");
+	}
 	if (!lintOutput) {
 		log.info("No lint output produced; skipping lint fix parsing.");
 		return [];
